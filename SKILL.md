@@ -10,7 +10,7 @@ description: 使用 HDC 与 UITest 调试纯血鸿蒙 HarmonyOS 真机或模拟�
 ## 工作流程
 
 1. 执行 `python3 <skill目录>/scripts/device.py devices`。明确选择设备，后续每次传 `--device <ID>`。多台设备而用户未指定时询问，不默认选第一台。
-2. 执行 `... --device <ID> observe --out-dir <绝对目录>`，用图片查看工具实际查看返回的 PNG，并读取 JSON 控件树。
+2. 纯文本模型先执行 `layout --out-dir <绝对目录>` 并读取 ui_text，使用 find / click / fill 按节点定位；遇到缺少节点的自绘内容，报告限制，不猜坐标。支持视觉时执行 `... --device <ID> observe --out-dir <绝对目录>`，用图片查看工具实际查看返回的 PNG，并读取 JSON 控件树。
 3. 根据 text、id 和 bounds 定位目标，点击原始屏幕坐标中的控件中心。自绘内容缺少节点时根据图像定位。
 4. 每个有意义的交互后重新 observe，验证页面变化。等待页面稳定；连续两次相同操作无进展时停止盲目重试并报告现状。
 5. 最终用绝对路径 Markdown 图片展示截图，说明实际结果。命令成功不等于页面符合预期。
@@ -32,6 +32,24 @@ python3 <skill目录>/scripts/device.py --device <ID> help
 ```
 
 observe 返回截图路径、原始宽高、控件树文件路径。两者依次采集，并非原子快照；动画或页面改变时重新观察。控件树较大时用 Python 遍历 attributes 的 text/id/bounds，而非输出整个文件。
+
+## 纯文本模型定位
+
+无需识别截图。`layout` 和 `observe` 额外返回 `ui_text` 文本摘要路径、前 50 个节点以及总数；完整摘要保存为 JSON Lines 格式的 `.txt`。每个节点包含 text、id、type、description、bounds、center、clickable、path 与 actionable。摘要优先保留有文字、标识、描述或可点击的节点，减少容器噪声。
+
+```bash
+python3 <skill目录>/scripts/device.py --device DEVICE_ID find --text '搜索'
+python3 <skill目录>/scripts/device.py --device DEVICE_ID find --text '变形记' --contains
+python3 <skill目录>/scripts/device.py --device DEVICE_ID click --id searchButton
+python3 <skill目录>/scripts/device.py --device DEVICE_ID click --text '搜索' --type Button
+python3 <skill目录>/scripts/device.py --device DEVICE_ID fill '变形记' --id searchInput
+```
+
+选择器支持 `--text`、`--id`、`--type`、`--description`，多个条件按 AND 匹配，默认精确相等；`--contains` 对所有给出的条件使用包含匹配。`find` 返回最多 50 个候选、总数及截断标记。`click` / `fill` 每次读取最新控件树，仅在匹配恰好一个可见、启用且有有效边界的节点时注入操作；零个或多个匹配时返回候选及非零退出码，不操作。父级隐藏或禁用的节点也排除。
+
+`actionable` 表示节点可作为坐标目标，并不保证该点未被遮挡，也不保证节点声明 clickable。文字节点可能借助父控件响应点击。重复文字可增加 ID 或类型条件；不要默认选第一个。`path` 用于理解层级，不是跨页面稳定标识。操作后重新读取控件树验证结果；fill 不自动清空或提交。
+
+Canvas、自绘与未暴露无障碍节点的内容可能无法定位，离屏控件需滚动后重新查找。对于自己的 ArkUI 应用，给关键交互组件添加稳定 `.id()` 和无障碍描述可提高可靠性。纯文本模式不推断节点树之外的视觉内容。
 
 ## 文本输入
 

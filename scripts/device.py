@@ -12,6 +12,38 @@ import sys
 import time
 import math
 import uuid
+import tempfile
+import re
+
+
+def flatten(tree):
+    nodes = []
+
+    def walk(node, path, active=True):
+        attrs = node.get('attributes', {})
+        active = active and all(str(attrs.get(k, 'true')).lower() != 'false' for k in ('visible', 'enabled'))
+        bounds = re.fullmatch(r'\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]', attrs.get('bounds', ''))
+        center = None
+        if bounds:
+            x1, y1, x2, y2 = map(int, bounds.groups())
+            if x1 >= 0 and y1 >= 0 and x2 > x1 and y2 > y1:
+                center = [(x1 + x2) // 2, (y1 + y2) // 2]
+        item = {k: attrs.get(k, '') for k in ('text', 'id', 'type', 'description', 'bounds', 'clickable')}
+        item.update(path=path, center=center, actionable=active and center is not None)
+        if any(item[k] for k in ('text', 'id', 'description', 'type')):
+            nodes.append(item)
+        for i, child in enumerate(node.get('children', [])):
+            walk(child, f'{path}/{i}', active)
+    walk(tree, '0')
+    return nodes
+
+
+def matches(nodes, args):
+    selectors = [(key, getattr(args, key)) for key in ('text', 'id', 'type', 'description') if getattr(args, key) is not None]
+    if not selectors or any(not value for _, value in selectors):
+        raise RuntimeError('Provide at least one nonempty selector: --text/--id/--type/--description.')
+    return [n for n in nodes if n['actionable'] and all(
+        value in n[key] if args.contains else value == n[key] for key, value in selectors)]
 
 
 def main():
@@ -22,6 +54,13 @@ def main():
     sub = p.add_subparsers(dest='command', required=True)
     sub.add_parser('devices')
     sub.add_parser('help')
+    for name in ('find', 'click', 'fill'):
+        selector = sub.add_parser(name, help='Locate using a fresh text UI tree')
+        for key in ('text', 'id', 'type', 'description'):
+            selector.add_argument('--' + key)
+        selector.add_argument('--contains', action='store_true')
+        if name == 'fill':
+            selector.add_argument('value')
     logs = sub.add_parser('logs', help='Save buffered or time-bounded hilog output')
     logs.add_argument('--out-dir', required=True)
     logs.add_argument('--seconds', type=float, default=0, help='0: buffered snapshot; 0 < seconds <= 60: stream')
@@ -64,7 +103,33 @@ def main():
     if not a.device:
         raise RuntimeError('Select an explicit --device from devices output.')
     result = {'device': a.device}
-    if a.command == 'logs':
+    if a.command in ('find', 'click', 'fill'):
+        if a.command == 'fill' and (not a.value or any(ord(c) < 32 or ord(c) == 127 for c in a.value)):
+            raise RuntimeError('Use nonempty single-line text without control characters.')
+        # Always query live state; paths and coordinates from older snapshots may be stale.
+        with tempfile.TemporaryDirectory(prefix='harmony-find-') as tmp:
+            remote = '/data/local/tmp/harmony-' + uuid.uuid4().hex + '.json'
+            local = Path(tmp) / 'layout.json'
+            try:
+                run(['shell', 'uitest', 'dumpLayout', '-p', remote])
+                run(['file', 'recv', remote, str(local)])
+                found = matches(flatten(json.loads(local.read_text())), a)
+            finally:
+                try:
+                    run(['shell', 'rm', remote])
+                except (RuntimeError, subprocess.TimeoutExpired):
+                    pass
+        result.update(match_count=len(found), candidates=found[:50], truncated=len(found) > 50)
+        if a.command != 'find':
+            if len(found) != 1:
+                result['error'] = 'Expected exactly one match; refine selectors. No input performed.'
+                print(json.dumps(result, ensure_ascii=False))
+                return 1
+            coords = list(map(str, found[0]['center']))
+            args = ['uitest', 'uiInput', 'click', *coords] if a.command == 'click' else ['uitest', 'uiInput', 'inputText', *coords, a.value]
+            result['output'] = run(['shell', shlex.join(args)])
+            result['verification_required'] = True
+    elif a.command == 'logs':
         if not math.isfinite(a.seconds) or not 0 <= a.seconds <= 60:
             raise RuntimeError('--seconds must be between 0 and 60.')
         if not 1 <= a.max_mb <= 100:
@@ -152,7 +217,14 @@ def main():
                     raise RuntimeError('Screenshot is not a PNG.')
                 result['width'], result['height'] = struct.unpack('>II', header[16:24])
             else:
-                json.loads(local.read_text())
+                nodes = [n for n in flatten(json.loads(local.read_text()))
+                         if n['text'] or n['id'] or n['description'] or n['clickable'] == 'true']
+                summary = local.with_suffix('.txt')
+                summary.write_text('\n'.join(json.dumps(n, ensure_ascii=False) for n in nodes))
+                result['ui_text'] = str(summary)
+                result['nodes'] = nodes[:50]
+                result['node_count'] = len(nodes)
+                result['nodes_truncated'] = len(nodes) > 50
             try:
                 run(['shell', 'rm', remote])
             except (RuntimeError, subprocess.TimeoutExpired) as exc:

@@ -10,7 +10,7 @@ HarmonyPilot 为支持本地命令执行和图片查看的 AI Agent 提供操作
 
 - 发现设备并明确选择目标，避免多设备时误操作。
 - 截图并取回电脑，返回原始图像宽高。
-- 导出页面控件树，按文字、组件标识和边界定位。
+- 导出页面控件树与文本摘要，按文字、组件标识、类型或描述查找、点击和输入，适配纯文本模型。
 - 模拟点击、滑动。
 - 向已聚焦输入框输入，或指定坐标后输入。
 - hilog 缓冲快照、限时日志采集，支持 PID、Tag、级别及正则过滤。
@@ -155,3 +155,24 @@ python3 scripts/device.py --device DEVICE_ID logs --tag MyTag --regex 'error|tim
 输出包含 `.log` 和 `.stderr.log` 的绝对路径、字节数、采集时长、退出码、结束原因及最多 4 KiB 尾部。默认 `--max-mb 10`，允许 1–100；轮询检测大小，文件可能略超过阈值。`duration` 为正常限时停止，`size_limit` 表示日志不完整，`timeout` 或非零自然退出需要检查诊断。部分 HDC 错误可能输出到日志文件，即使退出码为 0 也应检查内容。
 
 采集可能先输出历史缓冲日志；分析时结合时间、PID、截图，不能把所有日志归因于当前操作。需要边操作边采集时，在宿主后台会话运行限时命令，执行交互后等待其结束。终止本地采集客户端，不修改设备日志配置，不自动清空缓冲、关闭隐私脱敏或开启持久日志任务。真机日志仅保存到本地，不应上传仓库。
+
+## 纯文本模型定位
+
+无需识别截图。`layout` 和 `observe` 额外返回 `ui_text` 文本摘要路径、前 50 个节点以及总数；完整摘要保存为 JSON Lines 格式的 `.txt`。每个节点包含 text、id、type、description、bounds、center、clickable、path 与 actionable。摘要优先保留有文字、标识、描述或可点击的节点，减少容器噪声。
+
+```bash
+python3 scripts/device.py --device DEVICE_ID find --text '搜索'
+python3 scripts/device.py --device DEVICE_ID find --text '变形记' --contains
+python3 scripts/device.py --device DEVICE_ID click --id searchButton
+python3 scripts/device.py --device DEVICE_ID click --text '搜索' --type Button
+python3 scripts/device.py --device DEVICE_ID fill '变形记' --id searchInput
+```
+
+选择器支持 `--text`、`--id`、`--type`、`--description`，多个条件按 AND 匹配，默认精确相等；`--contains` 对所有给出的条件使用包含匹配。`find` 返回最多 50 个候选、总数及截断标记。`click` / `fill` 每次读取最新控件树，仅在匹配恰好一个可见、启用且有有效边界的节点时注入操作；零个或多个匹配时返回候选及非零退出码，不操作。父级隐藏或禁用的节点也排除。
+
+`actionable` 表示节点可作为坐标目标，并不保证该点未被遮挡，也不保证节点声明 clickable。文字节点可能借助父控件响应点击。重复文字可增加 ID 或类型条件；不要默认选第一个。`path` 用于理解层级，不是跨页面稳定标识。操作后重新读取控件树验证结果；fill 不自动清空或提交。
+
+Canvas、自绘与未暴露无障碍节点的内容可能无法定位，离屏控件需滚动后重新查找。对于自己的 ArkUI 应用，给关键交互组件添加稳定 `.id()` 和无障碍描述可提高可靠性。纯文本模式不推断节点树之外的视觉内容。
+
+
+运行选择器测试：`python3 -m unittest discover -s tests -v`。已验证精确/包含匹配、组合条件、隐藏/禁用节点排除和歧义匹配不注入操作；真机验证了文本摘要导出及无匹配查询。
