@@ -13,6 +13,7 @@ HarmonyPilot 为支持本地命令执行和图片查看的 AI Agent 提供操作
 - 导出页面控件树，按文字、组件标识和边界定位。
 - 模拟点击、滑动。
 - 向已聚焦输入框输入，或指定坐标后输入。
+- hilog 缓冲快照、限时日志采集，支持 PID、Tag、级别及正则过滤。
 - 以 JSON 返回结果，便于 Agent 或其他程序处理。
 
 ## 环境准备
@@ -105,6 +106,7 @@ python3 scripts/device.py --device DEVICE_ID help
 - 已在 HarmonyOS 真机上完成打开“阅读”、点击书架第一本书并截图的交互演示。
 - 封装脚本的截图、控件树读取已通过真机验证。
 - 已根据真机帮助确认文本输入语法，并通过中文、空格和 shell 特殊字符的参数转义测试；尚未验证真实输入框中的输入效果。
+- hilog 缓冲快照、两秒限时采集及 PID / Tag / 正则组合过滤已通过真机验证；快照超时和非法时长拒绝已通过本地检查。
 - 尚未验证 Windows、Linux 及全部 HarmonyOS 版本。
 
 ## 常见问题
@@ -134,3 +136,22 @@ scripts/device.py    HDC / UITest 命令封装
 - [OpenHarmony UITest 使用指导](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/application-test/uitest-guidelines.md)
 
 本项目是社区工具，与华为官方无隶属关系。
+
+## 日志采集
+
+```bash
+# 获取当前缓冲区日志并退出
+python3 scripts/device.py --device DEVICE_ID logs --out-dir ./artifacts
+
+# 采集 10 秒，按已确认的应用 PID 和精确级别集合过滤
+python3 scripts/device.py --device DEVICE_ID logs --seconds 10 --pid 1234 --levels E,F --out-dir ./artifacts
+
+# Tag / 正则过滤
+python3 scripts/device.py --device DEVICE_ID logs --tag MyTag --regex 'error|timeout' --out-dir ./artifacts
+```
+
+`--seconds` 默认 0（缓冲快照），最大 60。`--levels` 是精确集合，例如 `E,F`；不是最低级别。PID 需要确认，应用重启后可能改变。过滤参数可以组合。不同系统以 `hdc -t DEVICE_ID shell hilog --help` 为准。
+
+输出包含 `.log` 和 `.stderr.log` 的绝对路径、字节数、采集时长、退出码、结束原因及最多 4 KiB 尾部。默认 `--max-mb 10`，允许 1–100；轮询检测大小，文件可能略超过阈值。`duration` 为正常限时停止，`size_limit` 表示日志不完整，`timeout` 或非零自然退出需要检查诊断。部分 HDC 错误可能输出到日志文件，即使退出码为 0 也应检查内容。
+
+采集可能先输出历史缓冲日志；分析时结合时间、PID、截图，不能把所有日志归因于当前操作。需要边操作边采集时，在宿主后台会话运行限时命令，执行交互后等待其结束。终止本地采集客户端，不修改设备日志配置，不自动清空缓冲、关闭隐私脱敏或开启持久日志任务。真机日志仅保存到本地，不应上传仓库。

@@ -9,6 +9,8 @@ import shlex
 import struct
 import subprocess
 import sys
+import time
+import math
 import uuid
 
 
@@ -20,6 +22,14 @@ def main():
     sub = p.add_subparsers(dest='command', required=True)
     sub.add_parser('devices')
     sub.add_parser('help')
+    logs = sub.add_parser('logs', help='Save buffered or time-bounded hilog output')
+    logs.add_argument('--out-dir', required=True)
+    logs.add_argument('--seconds', type=float, default=0, help='0: buffered snapshot; 0 < seconds <= 60: stream')
+    logs.add_argument('--pid', type=int)
+    logs.add_argument('--tag')
+    logs.add_argument('--levels', help='Exact levels, e.g. E,F or D,I,W,E,F')
+    logs.add_argument('--regex')
+    logs.add_argument('--max-mb', type=int, default=10)
     text = sub.add_parser('text', help='Input into focused field, or target coordinates')
     text.add_argument('value')
     text.add_argument('--at', nargs=2, type=int, metavar=('X', 'Y'))
@@ -54,7 +64,54 @@ def main():
     if not a.device:
         raise RuntimeError('Select an explicit --device from devices output.')
     result = {'device': a.device}
-    if a.command == 'help':
+    if a.command == 'logs':
+        if not math.isfinite(a.seconds) or not 0 <= a.seconds <= 60:
+            raise RuntimeError('--seconds must be between 0 and 60.')
+        if not 1 <= a.max_mb <= 100:
+            raise RuntimeError('--max-mb must be between 1 and 100.')
+        if a.pid is not None and a.pid <= 0:
+            raise RuntimeError('--pid must be positive.')
+        args = ['hilog'] + (['-x'] if a.seconds == 0 else [])
+        for flag, value in [('-P', a.pid), ('-T', a.tag), ('-L', a.levels), ('-e', a.regex)]:
+            if value is not None:
+                args += [flag, str(value)]
+        out = Path(a.out_dir).expanduser().resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / ('hilog-' + uuid.uuid4().hex + '.log')
+        errpath = path.with_suffix('.stderr.log')
+        started = time.monotonic()
+        reason = 'completed'
+        limit = a.seconds if a.seconds else a.timeout
+        with path.open('wb') as stdout, errpath.open('wb') as stderr:
+            proc = subprocess.Popen([hdc, '-t', a.device, 'shell', shlex.join(args)], stdout=stdout, stderr=stderr)
+            try:
+                while proc.poll() is None:
+                    if path.stat().st_size + errpath.stat().st_size >= a.max_mb * 1024 * 1024:
+                        reason = 'size_limit'
+                        break
+                    if time.monotonic() - started >= limit:
+                        reason = 'duration' if a.seconds else 'timeout'
+                        break
+                    time.sleep(0.05)
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+        result.update(log=str(path), stderr=str(errpath), bytes=path.stat().st_size,
+                      elapsed_seconds=round(time.monotonic() - started, 2), stop_reason=reason,
+                      returncode=proc.returncode, includes_buffered_logs=True)
+        # Bounded summary: never send the complete log into the agent context.
+        with path.open('rb') as f:
+            f.seek(max(0, path.stat().st_size - 4096))
+            result['tail'] = f.read(4096).decode('utf-8', errors='replace')
+        if reason == 'timeout' or (reason == 'completed' and proc.returncode != 0):
+            print(json.dumps(result, ensure_ascii=False))
+            return 1
+    elif a.command == 'help':
         result['help'] = run(['shell', 'uitest', 'help'])
         result['input_help'] = run(['shell', 'uitest', 'uiInput', 'help'])
     elif a.command == 'text':
@@ -105,7 +162,7 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        sys.exit(main() or 0)
     except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({'error': str(exc)}, ensure_ascii=False), file=sys.stderr)
         sys.exit(1)
