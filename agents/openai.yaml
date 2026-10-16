@@ -1,0 +1,4 @@
+interface:
+  display_name: "HarmonyPilot"
+  short_description: "使用 HDC 与 UITest 操作鸿蒙真机，截图并验证页面变化"
+  default_prompt: "使用 $harmony-pilot 检查已连接的鸿蒙设备，完成指定操作并截图验证。"
